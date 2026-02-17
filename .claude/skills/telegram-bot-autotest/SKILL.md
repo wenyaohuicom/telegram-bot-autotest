@@ -3,10 +3,13 @@ name: telegram-bot-autotest
 description: >
   This skill should be used when the user asks to "test a telegram bot",
   "explore a bot's functionality", "autotest a Telegram bot",
-  "check what a bot does", "clone a bot", or "reverse engineer a bot".
+  "check what a bot does", "clone a bot", "reverse engineer a bot",
+  "find bugs in a bot", "debug a bot", "check for errors",
+  "test bot for issues", or "check bot health".
   It logs into Telegram as a personal account and deeply explores the
   specified bot's complete structure — every command, every inline button
-  (recursively), every reply keyboard — producing a full blueprint report.
+  (recursively), every reply keyboard — producing either a full blueprint
+  report (for cloning) or a debug report (for bug finding).
 ---
 
 # Telegram Bot Autotest Skill
@@ -72,44 +75,64 @@ python3 {{SKILL_DIR}}/scripts/tg_login.py --verify --password=XXXXX
 
 If `PhoneCodeInvalidError`, ask the user to re-enter the code.
 
+## Step 3.5: Determine Test Mode
+
+Before running the test, determine the mode based on the user's intent:
+
+- **Debug mode** — if the user's request contains words like: "bug", "debug", "error", "issue", "problem", "test for", "check for", "health", "broken", "fix", "diagnose"
+- **Blueprint mode** — if the user's request contains words like: "clone", "replicate", "copy", "1:1", "blueprint", "reverse engineer", "explore structure", "map out"
+- **Default** — if ambiguous, use **blueprint** mode
+
+Set the mode variable for Step 4:
+- Debug mode: `MODE=debug`
+- Blueprint mode: `MODE=blueprint`
+
 ## Step 4: Run Bot Test
 
 Once logged in, run the deep bot explorer:
 
 ```bash
-python3 {{SKILL_DIR}}/scripts/tg_bot_tester.py @TARGET_BOT --save
+python3 {{SKILL_DIR}}/scripts/tg_bot_tester.py @TARGET_BOT --mode=MODE --save
 ```
 
 Replace `@TARGET_BOT` with the bot username the user wants to test.
+Replace `MODE` with either `debug` or `blueprint` based on Step 3.5.
 
 Options:
 - `--max-depth=5` — Max inline button recursion depth (default 5)
 - `--max-buttons=100` — Max total buttons to click (default 100)
 - `--timeout=10` — Response timeout in seconds (default 10)
+- `--mode=blueprint|debug` — Test mode (default: blueprint)
 - `--save` — Save report to `~/.telegram-bot-autotest/reports/`
 
-## Step 5: Generate Blueprint Report
+## Step 5: Generate Report
 
-Parse the JSON output and present a **complete bot blueprint** to the user. The report should be detailed enough to replicate the bot.
+Parse the JSON output and present a report based on the mode used.
 
-### Report Structure
+---
 
-#### 1. Bot Identity
+### Step 5A: Blueprint Report (mode=blueprint)
+
+Present a **complete bot blueprint** to the user. The report should be detailed enough to replicate the bot.
+
+#### Report Structure
+
+##### 1. Bot Identity
 - Bot name, username, description
 - Registered commands list (from BotFather)
 
-#### 2. /start Response Blueprint
+##### 2. /start Response Blueprint
 - Exact response text (preserve emoji and formatting)
 - Full inline button layout: show rows and columns with exact button text
 - Reply keyboard layout if any
 
-#### 3. /help Response Blueprint
+##### 3. /help Response Blueprint
 - Exact response text
 - All commands discovered from help text
 
-#### 4. Button Navigation Tree
+##### 4. Button Navigation Tree
 This is the most important section. For each entry in `button_tree`, present:
-- **Path**: shows the navigation chain (e.g., `/start > [🔥 Trending] > [💰 ZEN]`)
+- **Path**: shows the navigation chain (e.g., `/start > [Trending] > [ZEN]`)
 - **Depth**: how deep in the tree
 - **Button text**: exact text with emoji
 - **Callback data**: the callback_data string
@@ -121,31 +144,88 @@ This is the most important section. For each entry in `button_tree`, present:
 
 Present the tree in a hierarchical format so the user can see the full navigation structure.
 
-#### 5. Reply Keyboard
+##### 5. Reply Keyboard
 - Each button text and what response it produced
 
-#### 6. Commands
+##### 6. Commands
 - Each registered command, its description, and its response
 - Each discovered command from /help and its response
 - Common commands that were recognized
 
-#### 7. Statistics
+##### 7. Statistics
 - Total interactions, successful responses, timeouts, errors
 - Buttons explored, max depth reached
 
-### Presentation Guidelines
+#### Presentation Guidelines
 
 - Preserve ALL emoji in button text and response text exactly as-is
 - Show inline button layouts as visual grids, e.g.:
   ```
-  [ 🪙 Launch Token ] [ 🔥 Trending ]
-  [ 💰 My Wallet    ] [ 📊 Portfolio ]
-  [ 🏆 Leaderboard  ] [ 🎁 Invite   ]
-  [ 📖 How to Earn                   ]
+  [ Launch Token ] [ Trending ]
+  [ My Wallet    ] [ Portfolio ]
+  [ Leaderboard  ] [ Invite   ]
+  [ How to Earn                ]
   ```
 - For the button tree, use indentation to show depth
 - Include callback_data values (needed for replication)
 - Note which buttons produce new messages vs edit existing ones
+
+---
+
+### Step 5B: Debug Report (mode=debug)
+
+Present a **bug report** focused on issues found during testing. Structure the report as follows:
+
+#### 1. Summary
+- **Health Score**: display the `health_score` value (0-100) with a visual indicator:
+  - 90-100: Healthy
+  - 70-89: Minor issues
+  - 50-69: Needs attention
+  - 0-49: Critical issues
+- **Total bugs found**: count by severity (high / medium / low)
+
+#### 2. Critical Issues (high severity)
+For each high-severity bug from the `bugs` list:
+- Type and location
+- Detailed description
+- Relevant details (button data, error messages, etc.)
+
+#### 3. Warnings (medium severity)
+For each medium-severity bug:
+- Type and location
+- Description and details
+
+#### 4. Info (low severity)
+For each low-severity bug:
+- Type and location
+- Description
+
+#### 5. Test Coverage
+Summarize what was tested:
+- Commands tested (list them)
+- Buttons explored (count and max depth)
+- Unexpected inputs tested (if debug mode ran Phase 8)
+- Button repeat tests (if debug mode ran Phase 9)
+
+#### 6. Statistics
+- Total interactions, successful responses, timeouts, errors
+- Buttons explored, max depth reached
+
+#### Presentation Guidelines
+
+- Group bugs by severity, with high severity first
+- Use clear labels for bug types:
+  - `no_start_response` → "/start has no response"
+  - `dead_button` → "Dead button (no response)"
+  - `broken_button` → "Broken button (error)"
+  - `command_timeout` → "Command timeout"
+  - `empty_response` → "Empty response"
+  - `error_in_response` → "Error in response text"
+  - `no_help` → "No /help response"
+  - `no_fallback` → "No fallback handler"
+  - `inconsistent_button` → "Inconsistent button behavior"
+  - `flood_triggered` → "Rate limit hit"
+- If no bugs are found, congratulate the user — the bot is healthy
 
 ## Error Handling
 

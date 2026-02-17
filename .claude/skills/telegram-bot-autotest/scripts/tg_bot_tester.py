@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Core Bot Auto-Exploration Engine — Deep recursive exploration.
 
-Usage: python3 tg_bot_tester.py @BotUsername [--timeout=10] [--max-depth=5] [--max-buttons=100]
+Usage: python3 tg_bot_tester.py @BotUsername [--timeout=10] [--max-depth=5] [--max-buttons=100] [--mode=blueprint|debug]
 
 Explores the COMPLETE bot structure:
   1. Bot info (description, registered commands)
@@ -13,18 +13,24 @@ Explores the COMPLETE bot structure:
   7. All commands discovered from /help text
   8. Common command probing
 
+Debug mode adds:
+  8. Input handling test — unexpected inputs to detect missing fallback handlers
+  9. Button repeat test — re-click buttons to detect inconsistencies
+
 For each interaction, records:
   - Exact button layout (rows, text with emoji, button type)
   - Click result (callback answer, new/edited message, new buttons)
   - Recursively explores any NEW buttons discovered
 
 Output: Complete bot structure blueprint as JSON.
+         In debug mode, also includes bugs list and health_score.
 """
 
 import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 from collections import deque
@@ -73,6 +79,23 @@ UNKNOWN_PATTERNS = [
 COMMON_COMMANDS = [
     "/settings", "/menu", "/info", "/about", "/status",
     "/profile", "/language", "/lang", "/cancel",
+]
+
+ERROR_PATTERNS = [
+    "traceback", "error", "exception", "internal server error",
+    "something went wrong", "unexpected error", "failed",
+    "ошибка", "что-то пошло не так",
+]
+
+DEBUG_INPUTS = [
+    {"label": "random_text", "value": "hello"},
+    {"label": "random_text", "value": "asdfgh"},
+    {"label": "numbers_only", "value": "12345"},
+    {"label": "special_chars", "value": "!@#$%"},
+    {"label": "long_text", "value": "A" * 500},
+    {"label": "emoji_only", "value": "\U0001f600\U0001f389\U0001f525"},
+    {"label": "empty_like", "value": " "},
+    {"label": "empty_like", "value": "."},
 ]
 
 
@@ -301,10 +324,210 @@ def collect_callback_buttons(data):
 
 
 # ---------------------------------------------------------------------------
+# Bug analysis (debug mode)
+# ---------------------------------------------------------------------------
+
+def _response_has_error_text(text):
+    """Check if response text contains error-like patterns."""
+    if not text:
+        return False
+    t = text.lower()
+    return any(p in t for p in ERROR_PATTERNS)
+
+
+def analyze_bugs(report):
+    """Scan complete report and generate a list of detected bugs with severity."""
+    bugs = []
+    structure = report.get("structure", {})
+
+    # --- /start checks ---
+    start = structure.get("start", {})
+    if start.get("timed_out") or not start.get("responses"):
+        bugs.append({
+            "severity": "high",
+            "type": "no_start_response",
+            "location": "/start",
+            "description": "/start command produced no response or timed out",
+            "details": {"timed_out": start.get("timed_out", False), "error": start.get("error")},
+        })
+    elif start.get("responses"):
+        for resp in start["responses"]:
+            text = resp.get("text", "")
+            if not text and not resp.get("has_media"):
+                bugs.append({
+                    "severity": "medium",
+                    "type": "empty_response",
+                    "location": "/start",
+                    "description": "/start returned an empty response (no text, no media)",
+                    "details": {"message_id": resp.get("id")},
+                })
+            if _response_has_error_text(text):
+                bugs.append({
+                    "severity": "medium",
+                    "type": "error_in_response",
+                    "location": "/start",
+                    "description": "Response text contains error-like patterns",
+                    "details": {"text_snippet": text[:200]},
+                })
+
+    # --- /help checks ---
+    help_rec = structure.get("help", {})
+    if help_rec.get("timed_out") or not help_rec.get("responses"):
+        bugs.append({
+            "severity": "low",
+            "type": "no_help",
+            "location": "/help",
+            "description": "/help command produced no response or timed out",
+            "details": {"timed_out": help_rec.get("timed_out", False), "error": help_rec.get("error")},
+        })
+
+    # --- Button tree checks ---
+    for node in structure.get("button_tree", []):
+        error = node.get("error")
+        path = node.get("path", "unknown")
+
+        if error:
+            if "DataInvalidError" in error:
+                bugs.append({
+                    "severity": "high",
+                    "type": "broken_button",
+                    "location": path,
+                    "description": f"Button click raised DataInvalidError",
+                    "details": {"button_text": node.get("button_text"), "button_data": node.get("button_data"), "error": error},
+                })
+            elif "MessageIdInvalidError" in error:
+                bugs.append({
+                    "severity": "high",
+                    "type": "broken_button",
+                    "location": path,
+                    "description": f"Button click raised MessageIdInvalidError",
+                    "details": {"button_text": node.get("button_text"), "button_data": node.get("button_data"), "error": error},
+                })
+            elif "FloodWaitError" in error:
+                bugs.append({
+                    "severity": "low",
+                    "type": "flood_triggered",
+                    "location": path,
+                    "description": "FloodWaitError encountered during button exploration",
+                    "details": {"error": error},
+                })
+            continue
+
+        # Dead button: no callback answer, no new message, no edited message, no error
+        has_callback = node.get("callback_answer") is not None
+        has_new_msg = node.get("result_message") is not None
+        has_edited_msg = node.get("result_edited") is not None
+        if not has_callback and not has_new_msg and not has_edited_msg:
+            bugs.append({
+                "severity": "high",
+                "type": "dead_button",
+                "location": path,
+                "description": "Button click produced no response at all (no callback, no message, no edit)",
+                "details": {"button_text": node.get("button_text"), "button_data": node.get("button_data")},
+            })
+
+        # Check response text for errors
+        for key in ("result_message", "result_edited"):
+            msg = node.get(key)
+            if msg:
+                text = msg.get("text", "")
+                if not text and not msg.get("has_media"):
+                    bugs.append({
+                        "severity": "medium",
+                        "type": "empty_response",
+                        "location": path,
+                        "description": f"Button click returned empty response ({key})",
+                        "details": {"button_text": node.get("button_text"), "message_id": msg.get("id")},
+                    })
+                if _response_has_error_text(text):
+                    bugs.append({
+                        "severity": "medium",
+                        "type": "error_in_response",
+                        "location": path,
+                        "description": f"Response contains error-like patterns ({key})",
+                        "details": {"button_text": node.get("button_text"), "text_snippet": text[:200]},
+                    })
+
+    # --- Registered commands checks ---
+    for rec in structure.get("registered_commands", []):
+        cmd = rec.get("sent", "unknown")
+        if rec.get("timed_out") or not rec.get("responses"):
+            bugs.append({
+                "severity": "medium",
+                "type": "command_timeout",
+                "location": cmd,
+                "description": f"Registered command {cmd} timed out or had no response",
+                "details": {"timed_out": rec.get("timed_out", False), "error": rec.get("error")},
+            })
+        elif rec.get("responses"):
+            for resp in rec["responses"]:
+                text = resp.get("text", "")
+                if not text and not resp.get("has_media"):
+                    bugs.append({
+                        "severity": "medium",
+                        "type": "empty_response",
+                        "location": cmd,
+                        "description": f"Command {cmd} returned an empty response",
+                        "details": {"message_id": resp.get("id")},
+                    })
+                if _response_has_error_text(text):
+                    bugs.append({
+                        "severity": "medium",
+                        "type": "error_in_response",
+                        "location": cmd,
+                        "description": f"Command {cmd} response contains error-like patterns",
+                        "details": {"text_snippet": text[:200]},
+                    })
+
+    # --- Input handling checks (debug-only phase results) ---
+    input_results = structure.get("input_handling", [])
+    responded_count = 0
+    for rec in input_results:
+        if rec.get("responses"):
+            responded_count += 1
+    if input_results and responded_count == 0:
+        bugs.append({
+            "severity": "low",
+            "type": "no_fallback",
+            "location": "unexpected_input",
+            "description": "Bot ignores all unexpected text input (no fallback handler detected)",
+            "details": {"inputs_tested": len(input_results), "responses_received": 0},
+        })
+
+    # --- Button repeat checks (debug-only phase results) ---
+    for rec in structure.get("button_repeat_test", []):
+        if rec.get("inconsistent"):
+            bugs.append({
+                "severity": "medium",
+                "type": "inconsistent_button",
+                "location": rec.get("path", "unknown"),
+                "description": "Button produced different result on repeat click",
+                "details": {
+                    "button_text": rec.get("button_text"),
+                    "button_data": rec.get("button_data"),
+                    "difference": rec.get("difference"),
+                },
+            })
+
+    return bugs
+
+
+def compute_health_score(bugs):
+    """Compute a health score (0-100) based on weighted bug severity."""
+    if not bugs:
+        return 100
+
+    weights = {"high": 15, "medium": 5, "low": 2}
+    total_penalty = sum(weights.get(b["severity"], 1) for b in bugs)
+    score = max(0, 100 - total_penalty)
+    return score
+
+
+# ---------------------------------------------------------------------------
 # Main engine
 # ---------------------------------------------------------------------------
 
-async def run_test(bot_username, timeout=10, max_depth=5, max_buttons=100):
+async def run_test(bot_username, timeout=10, max_depth=5, max_buttons=100, mode="blueprint"):
     from telethon import TelegramClient
     from telethon.tl.functions.users import GetFullUserRequest
     from telethon.errors import FloodWaitError
@@ -332,6 +555,7 @@ async def run_test(bot_username, timeout=10, max_depth=5, max_buttons=100):
 
     report = {
         "ok": True,
+        "mode": mode,
         "bot_username": bot_username,
         "test_started": datetime.now(timezone.utc).isoformat(),
         "bot_info": {},
@@ -759,6 +983,140 @@ async def run_test(bot_username, timeout=10, max_depth=5, max_buttons=100):
 
         report["structure"]["common_commands"] = probe_results
 
+        # =====================================================================
+        # Phase 8: Input Handling Test (debug mode only)
+        # =====================================================================
+        if mode == "debug":
+            input_results = []
+            for inp in DEBUG_INPUTS:
+                await asyncio.sleep(INTERACTION_DELAY)
+                rec = await send_and_capture(client, bot_entity, inp["value"], timeout)
+                rec["input_label"] = inp["label"]
+                input_results.append(rec)
+                stats["total_interactions"] += 1
+                if rec["responses"]:
+                    stats["successful_responses"] += 1
+                elif rec["timed_out"]:
+                    stats["timeouts"] += 1
+
+            report["structure"]["input_handling"] = input_results
+
+        # =====================================================================
+        # Phase 9: Button Repeat Test (debug mode only)
+        # =====================================================================
+        if mode == "debug":
+            repeat_results = []
+            # Select up to 10 previously visited callback buttons to re-click
+            candidates = []
+            for node in button_tree:
+                if node.get("error"):
+                    continue
+                if node.get("button_data") and (node.get("result_message") or node.get("result_edited") or node.get("callback_answer")):
+                    candidates.append(node)
+
+            sample = candidates[:10] if len(candidates) <= 10 else random.sample(candidates, 10)
+
+            for original in sample:
+                btn_data = original["button_data"]
+                btn_text = original["button_text"]
+                path = original.get("path", "unknown")
+
+                # We need a valid msg_id to click. Try to find one from the latest
+                # messages in the chat — re-send /start to get a fresh context.
+                await asyncio.sleep(INTERACTION_DELAY)
+
+                # Find a message that has this button data still present
+                # The simplest approach: look for messages with inline buttons
+                msg_id = None
+                async for m in client.iter_messages(bot_entity, limit=20):
+                    if m.out:
+                        continue
+                    if m.reply_markup:
+                        inline, _ = extract_button_layout(m.reply_markup)
+                        if inline:
+                            for row in inline:
+                                for btn in row:
+                                    if btn.get("data") == btn_data:
+                                        msg_id = m.id
+                                        break
+                                if msg_id:
+                                    break
+                    if msg_id:
+                        break
+
+                if not msg_id:
+                    continue
+
+                try:
+                    result = await click_button(client, msg_id, bot_entity, btn_data)
+                except FloodWaitError as e:
+                    repeat_results.append({
+                        "path": path,
+                        "button_text": btn_text,
+                        "button_data": btn_data,
+                        "error": f"FloodWaitError: wait {e.seconds}s",
+                        "inconsistent": False,
+                    })
+                    stats["errors"] += 1
+                    break
+                except Exception as e:
+                    repeat_results.append({
+                        "path": path,
+                        "button_text": btn_text,
+                        "button_data": btn_data,
+                        "error": str(e),
+                        "inconsistent": False,
+                    })
+                    stats["errors"] += 1
+                    continue
+
+                stats["total_interactions"] += 1
+                stats["buttons_explored"] += 1
+
+                # Compare with original result
+                inconsistent = False
+                difference = None
+
+                orig_cb = original.get("callback_answer")
+                new_cb = result.get("callback_answer")
+
+                orig_text = ""
+                new_text = ""
+                for key in ("result_message", "result_edited"):
+                    orig_msg = original.get(key)
+                    if orig_msg:
+                        orig_text = orig_msg.get("text", "")
+                for key in ("new_message", "edited_message"):
+                    new_msg = result.get(key)
+                    if new_msg:
+                        new_text = new_msg.get("text", "")
+
+                if orig_cb != new_cb:
+                    inconsistent = True
+                    difference = f"callback_answer changed: {orig_cb!r} -> {new_cb!r}"
+                elif orig_text and new_text and orig_text != new_text:
+                    inconsistent = True
+                    difference = f"response text changed (first: {len(orig_text)} chars, repeat: {len(new_text)} chars)"
+                elif (orig_text and not new_text) or (not orig_text and new_text):
+                    inconsistent = True
+                    difference = f"response presence changed (first had text: {bool(orig_text)}, repeat: {bool(new_text)})"
+
+                if result.get("error"):
+                    stats["errors"] += 1
+                else:
+                    stats["successful_responses"] += 1
+
+                repeat_results.append({
+                    "path": path,
+                    "button_text": btn_text,
+                    "button_data": btn_data,
+                    "inconsistent": inconsistent,
+                    "difference": difference,
+                    "error": result.get("error"),
+                })
+
+            report["structure"]["button_repeat_test"] = repeat_results
+
         report["test_finished"] = datetime.now(timezone.utc).isoformat()
         report["statistics"] = stats
 
@@ -780,6 +1138,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=10, help="Response timeout (default: 10)")
     parser.add_argument("--max-depth", type=int, default=5, help="Max button exploration depth (default: 5)")
     parser.add_argument("--max-buttons", type=int, default=100, help="Max total buttons to click (default: 100)")
+    parser.add_argument("--mode", choices=["blueprint", "debug"], default="blueprint",
+                        help="Test mode: blueprint (structure mapping) or debug (bug finding)")
     parser.add_argument("--save", action="store_true", help="Save report to ~/.telegram-bot-autotest/reports/")
 
     args = parser.parse_args()
@@ -788,12 +1148,21 @@ def main():
     if not bot.startswith("@"):
         bot = "@" + bot
 
-    report = asyncio.run(run_test(bot, timeout=args.timeout, max_depth=args.max_depth, max_buttons=args.max_buttons))
+    report = asyncio.run(run_test(
+        bot, timeout=args.timeout, max_depth=args.max_depth,
+        max_buttons=args.max_buttons, mode=args.mode,
+    ))
+
+    # In debug mode, run bug analysis on the completed report
+    if args.mode == "debug" and report.get("ok"):
+        bugs = analyze_bugs(report)
+        report["bugs"] = bugs
+        report["health_score"] = compute_health_score(bugs)
 
     if args.save and report.get("ok"):
         reports_dir = Path.home() / ".telegram-bot-autotest" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{bot.lstrip('@')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"{bot.lstrip('@')}_{args.mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         filepath = reports_dir / filename
         filepath.write_text(json.dumps(report, indent=2, ensure_ascii=False))
         report["saved_to"] = str(filepath)
