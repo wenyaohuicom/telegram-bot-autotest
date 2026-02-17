@@ -1,0 +1,111 @@
+{
+  "ok": true,
+  "bot_username": "@BotFather",
+  "test_started": "2026-02-17T12:00:00+00:00",
+  "bot_info": {
+    "id": 93372553,
+    "first_name": "BotFather",
+    "username": "BotFather",
+    "is_bot": true,
+    "description": "BotFather is the one bot to rule them all. Use it to create new bot accounts and manage your existing bots.",
+    "registered_commands": [
+      {"command": "/newbot", "description": "create a new bot"},
+      {"command": "/mybots", "description": "edit your bots"},
+      {"command": "/setname", "description": "change a bot's name"},
+      {"command": "/setdescription", "description": "change bot description"},
+      {"command": "/setabouttext", "description": "change bot about info"},
+      {"command": "/setuserpic", "description": "change bot profile photo"},
+      {"command": "/setcommands", "description": "change the list of commands"},
+      {"command": "/deletebot", "description": "delete a bot"},
+      {"command": "/cancel", "description": "cancel the current operation"},
+      {"command": "/token", "description": "generate authorization token"},
+      {"command": "/revoke", "description": "revoke bot access token"},
+      {"command": "/setinline", "description": "toggle inline mode"},
+      {"command": "/setinlinegeo", "description": "toggle inline location requests"},
+      {"command": "/setinlinefeedback", "description": "change inline feedback settings"},
+      {"command": "/setjoingroups", "description": "can your bot be added to groups?"},
+      {"command": "/setprivacy", "description": "toggle privacy mode in groups"},
+      {"command": "/help", "description": "list available commands"}
+    ]
+  },
+  "phases": {
+    "start": {
+      "sent": "/start",
+      "responses": [
+        {
+          "id": 100001,
+          "text": "I can help you create and manage Telegram bots. If you're new to the Bot API, please see the manual.\n\nYou can control me by sending these commands:\n\n/newbot - create a new bot\n/mybots - edit your bots [beta]\n...",
+          "date": "2026-02-17T12:00:01+00:00",
+          "inline_buttons": [],
+          "has_media": false
+        }
+      ],
+      "error": null,
+      "timed_out": false
+    },
+    "help": {
+      "sent": "/help",
+      "responses": [
+        {
+          "id": 100002,
+          "text": "I can help you create and manage Telegram bots...",
+          "date": "2026-02-17T12:00:03+00:00",
+          "has_media": false
+        }
+      ],
+      "error": null,
+      "timed_out": false
+    },
+    "inline_buttons": [],
+    "reply_keyboard": [],
+    "registered_commands": [
+      {
+        "sent": "/newbot",
+        "command_description": "create a new bot",
+        "responses": [
+          {
+            "id": 100003,
+            "text": "Alright, a new bot. How are we going to call it? Please choose a name for your bot.",
+            "date": "2026-02-17T12:00:05+00:00",
+            "has_media": false
+          }
+        ],
+        "error": null,
+        "timed_out": false
+      },
+      {
+        "sent": "/cancel",
+        "command_description": "cancel the current operation",
+        "responses": [
+          {
+            "id": 100004,
+            "text": "The command /newbot has been cancelled. Anything else I can do for you?",
+            "date": "2026-02-17T12:00:07+00:00",
+            "has_media": false
+          }
+        ],
+        "error": null,
+        "timed_out": false
+      }
+    ],
+    "common_commands": [
+      {
+        "sent": "/settings",
+        "responses": [],
+        "error": null,
+        "timed_out": true,
+        "recognized": false
+      }
+    ]
+  },
+  "statistics": {
+    "total_interactions": 6,
+    "successful_responses": 4,
+    "timeouts": 2,
+    "errors": 0,
+    "buttons_clicked": 0,
+    "commands_tested": 6
+  },
+  "test_finished": "2026-02-17T12:00:30+00:00",
+  "saved_to": "/root/.telegram-bot-autotest/reports/BotFather_20260217_120030.json"
+}
