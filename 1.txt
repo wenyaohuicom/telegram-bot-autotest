@@ -1,0 +1,5 @@
+The quick brown fox jumps over the lazy dog.
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Hello World! This is a test file.
+42 is the answer to life, the universe, and everything.
+今天天气不错，适合写代码。
