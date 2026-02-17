@@ -21,7 +21,7 @@ A Claude Code plugin/skill that automatically tests Telegram bots by logging in 
 Or from marketplace:
 
 ```
-/plugin marketplace add wenyaohuicom/telegram-bot-autotest
+/plugin marketplace add wenyaohuicom/telegram-bot-autotest-skill
 /plugin install telegram-bot-autotest@telegram-bot-autotest
 ```
 

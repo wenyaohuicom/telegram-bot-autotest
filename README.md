@@ -23,7 +23,7 @@
 或从 marketplace 安装：
 
 ```
-/plugin marketplace add wenyaohuicom/telegram-bot-autotest
+/plugin marketplace add wenyaohuicom/telegram-bot-autotest-skill
 /plugin install telegram-bot-autotest@telegram-bot-autotest
 ```
 
