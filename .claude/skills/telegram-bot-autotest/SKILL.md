@@ -5,11 +5,12 @@ description: >
   "explore a bot's functionality", "autotest a Telegram bot",
   "check what a bot does", "clone a bot", "reverse engineer a bot",
   "find bugs in a bot", "debug a bot", "check for errors",
-  "test bot for issues", or "check bot health".
-  It logs into Telegram as a personal account and deeply explores the
-  specified bot's complete structure — every command, every inline button
-  (recursively), every reply keyboard — producing either a full blueprint
-  report (for cloning) or a debug report (for bug finding).
+  "test bot for issues", "check bot health",
+  "test a specific button", "what happens when I click...",
+  "test the /start flow", or "check what a button shows".
+  It logs into Telegram as a personal account and supports three modes:
+  blueprint (full structure for cloning), debug (bug finding),
+  and targeted (test a specific path like /start > [Button]).
 ---
 
 # Telegram Bot Autotest Skill
@@ -79,30 +80,48 @@ If `PhoneCodeInvalidError`, ask the user to re-enter the code.
 
 Before running the test, determine the mode based on the user's intent:
 
+- **Targeted mode** — if the user asks about a specific button, a specific flow, or what happens at a particular step. Look for: a specific button name mentioned, "click", "what happens when", "what does X show", "test the X button", "after /start click Y". The user typically describes a path like "send /start then click 一键发币".
 - **Debug mode** — if the user's request contains words like: "bug", "debug", "error", "issue", "problem", "test for", "check for", "health", "broken", "fix", "diagnose"
 - **Blueprint mode** — if the user's request contains words like: "clone", "replicate", "copy", "1:1", "blueprint", "reverse engineer", "explore structure", "map out"
 - **Default** — if ambiguous, use **blueprint** mode
 
 Set the mode variable for Step 4:
+- Targeted mode: `MODE=targeted` — also construct the `PATH` string (see Step 4)
 - Debug mode: `MODE=debug`
 - Blueprint mode: `MODE=blueprint`
 
 ## Step 4: Run Bot Test
 
-Once logged in, run the deep bot explorer:
+Once logged in, run the bot tester. The command depends on the mode:
+
+**Blueprint or Debug mode:**
 
 ```bash
 python3 {{SKILL_DIR}}/scripts/tg_bot_tester.py @TARGET_BOT --mode=MODE --save
 ```
 
+**Targeted mode:**
+
+```bash
+python3 {{SKILL_DIR}}/scripts/tg_bot_tester.py @TARGET_BOT --mode=targeted --path="/start > [Button Text] > [Next Button]" --save
+```
+
+Construct the `--path` value from the user's description:
+- First element is the command to send (e.g., `/start`, `/help`, `/menu`)
+- Subsequent elements are button texts wrapped in `[...]`, separated by ` > `
+- Example: user says "send /start then click 一键发币" → `--path="/start > [一键发币]"`
+- Example: user says "click 一键发币 then 确认" → `--path="/start > [一键发币] > [确认]"`
+- Button matching is flexible: exact match first, then case-insensitive, then substring
+
 Replace `@TARGET_BOT` with the bot username the user wants to test.
-Replace `MODE` with either `debug` or `blueprint` based on Step 3.5.
+Replace `MODE` with `blueprint`, `debug`, or `targeted` based on Step 3.5.
 
 Options:
 - `--max-depth=5` — Max inline button recursion depth (default 5)
 - `--max-buttons=100` — Max total buttons to click (default 100)
 - `--timeout=10` — Response timeout in seconds (default 10)
-- `--mode=blueprint|debug` — Test mode (default: blueprint)
+- `--mode=blueprint|debug|targeted` — Test mode (default: blueprint)
+- `--path="..."` — Required for targeted mode. The navigation path to test.
 - `--save` — Save report to `~/.telegram-bot-autotest/reports/`
 
 ## Step 5: Generate Report
@@ -226,6 +245,42 @@ Summarize what was tested:
   - `inconsistent_button` → "Inconsistent button behavior"
   - `flood_triggered` → "Rate limit hit"
 - If no bugs are found, congratulate the user — the bot is healthy
+
+---
+
+### Step 5C: Targeted Report (mode=targeted)
+
+Present the **step-by-step result** of the specific path the user requested. This should be concise and direct — the user wants to know exactly what happens at each step.
+
+#### Report Structure
+
+For each entry in the `steps` list:
+
+**Step 1 — Command sent** (e.g., "/start"):
+- Show the response text (preserve emoji and formatting)
+- Show the inline button layout as a visual grid
+- Note which buttons are available to click next
+
+**Step 2+ — Button clicked** (e.g., "[一键发币]"):
+- Show matched button text and callback_data
+- Show the callback answer (toast/alert) if any
+- Show the new message or edited message:
+  - Full response text (preserve emoji and formatting)
+  - Any new inline buttons that appeared (visual grid)
+  - Whether it was a new message or edited the existing one
+- If more buttons are available, list them
+
+**If a button was not found:**
+- Show the error clearly
+- List all available buttons so the user can correct the path
+
+#### Presentation Guidelines
+
+- Be concise — the user asked about a specific flow, give them exactly that
+- Preserve ALL emoji in text and buttons
+- Show button layouts as visual grids
+- If the path completed successfully, summarize what the final screen shows
+- If the path broke at some step, explain where and why, and show available options
 
 ## Error Handling
 

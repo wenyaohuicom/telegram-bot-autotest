@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Core Bot Auto-Exploration Engine — Deep recursive exploration.
 
-Usage: python3 tg_bot_tester.py @BotUsername [--timeout=10] [--max-depth=5] [--max-buttons=100] [--mode=blueprint|debug]
+Usage: python3 tg_bot_tester.py @BotUsername [--timeout=10] [--max-depth=5] [--max-buttons=100] [--mode=blueprint|debug|targeted]
+       python3 tg_bot_tester.py @BotUsername --mode=targeted --path="/start > [Button Text] > [Next Button]"
 
 Explores the COMPLETE bot structure:
   1. Bot info (description, registered commands)
@@ -16,6 +17,10 @@ Explores the COMPLETE bot structure:
 Debug mode adds:
   8. Input handling test — unexpected inputs to detect missing fallback handlers
   9. Button repeat test — re-click buttons to detect inconsistencies
+
+Targeted mode:
+  Only executes a specific path, e.g. /start > [Button A] > [Button B]
+  Returns the result of each step along the path.
 
 For each interaction, records:
   - Exact button layout (rows, text with emoji, button type)
@@ -1132,14 +1137,244 @@ async def run_test(bot_username, timeout=10, max_depth=5, max_buttons=100, mode=
     return report
 
 
+# ---------------------------------------------------------------------------
+# Targeted mode — walk a specific path
+# ---------------------------------------------------------------------------
+
+def parse_targeted_path(path_str):
+    """Parse a targeted path string into a list of steps.
+
+    Format: '/start > [Button A] > [Button B]'
+    Returns: ['/start', 'Button A', 'Button B']
+
+    The first element is the command to send.
+    Subsequent elements are button texts to click in order.
+    """
+    parts = [p.strip() for p in path_str.split(">")]
+    steps = []
+    for part in parts:
+        # Strip surrounding [ ] if present
+        if part.startswith("[") and part.endswith("]"):
+            steps.append(part[1:-1])
+        else:
+            steps.append(part)
+    return steps
+
+
+def _find_button_in_responses(responses, target_text):
+    """Find a callback button matching target_text in a list of serialized responses.
+
+    Uses substring matching and case-insensitive comparison as fallback.
+    Returns (msg_id, button_text, button_data) or (None, None, None).
+    """
+    # Pass 1: exact match
+    for resp in responses:
+        msg_id = resp.get("id")
+        if not msg_id:
+            continue
+        for row in resp.get("inline_buttons", []):
+            for btn in row:
+                if btn.get("type") == "callback" and btn.get("text") == target_text:
+                    return msg_id, btn["text"], btn["data"]
+
+    # Pass 2: case-insensitive match
+    target_lower = target_text.lower()
+    for resp in responses:
+        msg_id = resp.get("id")
+        if not msg_id:
+            continue
+        for row in resp.get("inline_buttons", []):
+            for btn in row:
+                if btn.get("type") == "callback" and btn.get("text", "").lower() == target_lower:
+                    return msg_id, btn["text"], btn["data"]
+
+    # Pass 3: substring match (target is contained in button text, or vice versa)
+    for resp in responses:
+        msg_id = resp.get("id")
+        if not msg_id:
+            continue
+        for row in resp.get("inline_buttons", []):
+            for btn in row:
+                if btn.get("type") != "callback":
+                    continue
+                btn_text = btn.get("text", "")
+                if target_lower in btn_text.lower() or btn_text.lower() in target_lower:
+                    return msg_id, btn["text"], btn["data"]
+
+    return None, None, None
+
+
+async def run_targeted_test(bot_username, path_str, timeout=10):
+    """Execute only the specific path and return the result of each step."""
+    from telethon import TelegramClient
+    from telethon.errors import FloodWaitError
+
+    config, error = load_config()
+    if error:
+        return {"ok": False, "error": error}
+
+    steps = parse_targeted_path(path_str)
+    if not steps:
+        return {"ok": False, "error": "Empty path. Use format: /start > [Button A] > [Button B]"}
+
+    client = TelegramClient(config["session_path"], config["api_id"], config["api_hash"])
+    await client.connect()
+
+    if not await client.is_user_authorized():
+        await client.disconnect()
+        return {"ok": False, "error": "Not authorized. Run tg_login.py --login first."}
+
+    report = {
+        "ok": True,
+        "mode": "targeted",
+        "bot_username": bot_username,
+        "path": path_str,
+        "test_started": datetime.now(timezone.utc).isoformat(),
+        "steps": [],
+    }
+
+    try:
+        try:
+            bot_entity = await client.get_entity(bot_username)
+        except Exception as e:
+            await client.disconnect()
+            return {"ok": False, "error": f"Cannot find bot '{bot_username}': {e}"}
+
+        command = steps[0]
+        button_steps = steps[1:]
+
+        # Step 1: Send the initial command
+        await asyncio.sleep(INTERACTION_DELAY)
+        cmd_rec = await send_and_capture(client, bot_entity, command, timeout)
+
+        step_entry = {
+            "action": "send_command",
+            "command": command,
+            "responses": cmd_rec.get("responses", []),
+            "error": cmd_rec.get("error"),
+            "timed_out": cmd_rec.get("timed_out", False),
+        }
+
+        # List available buttons for context
+        available_buttons = []
+        for resp in cmd_rec.get("responses", []):
+            for row in resp.get("inline_buttons", []):
+                for btn in row:
+                    available_buttons.append(btn.get("text", ""))
+        if available_buttons:
+            step_entry["available_buttons"] = available_buttons
+
+        report["steps"].append(step_entry)
+
+        if cmd_rec.get("timed_out") or not cmd_rec.get("responses"):
+            report["steps"][-1]["note"] = f"Command {command} produced no response, cannot continue path."
+            report["test_finished"] = datetime.now(timezone.utc).isoformat()
+            await client.disconnect()
+            return report
+
+        # Step 2+: Click each button in sequence
+        current_responses = cmd_rec.get("responses", [])
+
+        for i, btn_target in enumerate(button_steps):
+            await asyncio.sleep(INTERACTION_DELAY)
+
+            msg_id, matched_text, btn_data = _find_button_in_responses(current_responses, btn_target)
+
+            if msg_id is None:
+                # Also check edited messages from the previous step's result
+                available = []
+                for resp in current_responses:
+                    for row in resp.get("inline_buttons", []):
+                        for btn in row:
+                            available.append(btn.get("text", ""))
+                report["steps"].append({
+                    "action": "click_button",
+                    "target": btn_target,
+                    "error": f"Button '{btn_target}' not found in current response.",
+                    "available_buttons": available,
+                })
+                break
+
+            try:
+                result = await click_button(client, msg_id, bot_entity, btn_data)
+            except FloodWaitError as e:
+                report["steps"].append({
+                    "action": "click_button",
+                    "target": btn_target,
+                    "matched_text": matched_text,
+                    "button_data": btn_data,
+                    "error": f"FloodWaitError: wait {e.seconds}s",
+                })
+                break
+            except Exception as e:
+                report["steps"].append({
+                    "action": "click_button",
+                    "target": btn_target,
+                    "matched_text": matched_text,
+                    "button_data": btn_data,
+                    "error": f"{type(e).__name__}: {e}",
+                })
+                break
+
+            step_entry = {
+                "action": "click_button",
+                "target": btn_target,
+                "matched_text": matched_text,
+                "button_data": btn_data,
+                "callback_answer": result.get("callback_answer"),
+                "error": result.get("error"),
+            }
+
+            if result.get("new_message"):
+                step_entry["new_message"] = result["new_message"]
+            if result.get("edited_message"):
+                step_entry["edited_message"] = result["edited_message"]
+
+            # Collect available buttons from the result for next step
+            next_responses = []
+            if result.get("new_message"):
+                next_responses.append(result["new_message"])
+            if result.get("edited_message"):
+                next_responses.append(result["edited_message"])
+
+            available_buttons = []
+            for resp in next_responses:
+                for row in resp.get("inline_buttons", []):
+                    for btn in row:
+                        available_buttons.append(btn.get("text", ""))
+            if available_buttons:
+                step_entry["available_buttons"] = available_buttons
+
+            report["steps"].append(step_entry)
+
+            # Prepare for next iteration
+            current_responses = next_responses
+            if not current_responses and i < len(button_steps) - 1:
+                report["steps"][-1]["note"] = "No new message or edit after click, cannot continue path."
+                break
+
+        report["test_finished"] = datetime.now(timezone.utc).isoformat()
+
+    except FloodWaitError as e:
+        report["error"] = f"FloodWaitError: must wait {e.seconds}s. Test aborted."
+    except Exception as e:
+        report["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        await client.disconnect()
+
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description="Telegram Bot Deep Explorer")
     parser.add_argument("bot", help="Bot username (e.g. @BotFather)")
     parser.add_argument("--timeout", type=int, default=10, help="Response timeout (default: 10)")
     parser.add_argument("--max-depth", type=int, default=5, help="Max button exploration depth (default: 5)")
     parser.add_argument("--max-buttons", type=int, default=100, help="Max total buttons to click (default: 100)")
-    parser.add_argument("--mode", choices=["blueprint", "debug"], default="blueprint",
-                        help="Test mode: blueprint (structure mapping) or debug (bug finding)")
+    parser.add_argument("--mode", choices=["blueprint", "debug", "targeted"], default="blueprint",
+                        help="Test mode: blueprint (structure mapping), debug (bug finding), or targeted (specific path)")
+    parser.add_argument("--path", type=str, default=None,
+                        help="Targeted mode path, e.g. '/start > [Button A] > [Button B]'")
     parser.add_argument("--save", action="store_true", help="Save report to ~/.telegram-bot-autotest/reports/")
 
     args = parser.parse_args()
@@ -1148,16 +1383,22 @@ def main():
     if not bot.startswith("@"):
         bot = "@" + bot
 
-    report = asyncio.run(run_test(
-        bot, timeout=args.timeout, max_depth=args.max_depth,
-        max_buttons=args.max_buttons, mode=args.mode,
-    ))
+    if args.mode == "targeted":
+        if not args.path:
+            print(json.dumps({"ok": False, "error": "--path is required for targeted mode. Example: --path='/start > [Button A]'"}))
+            sys.exit(1)
+        report = asyncio.run(run_targeted_test(bot, args.path, timeout=args.timeout))
+    else:
+        report = asyncio.run(run_test(
+            bot, timeout=args.timeout, max_depth=args.max_depth,
+            max_buttons=args.max_buttons, mode=args.mode,
+        ))
 
-    # In debug mode, run bug analysis on the completed report
-    if args.mode == "debug" and report.get("ok"):
-        bugs = analyze_bugs(report)
-        report["bugs"] = bugs
-        report["health_score"] = compute_health_score(bugs)
+        # In debug mode, run bug analysis on the completed report
+        if args.mode == "debug" and report.get("ok"):
+            bugs = analyze_bugs(report)
+            report["bugs"] = bugs
+            report["health_score"] = compute_health_score(bugs)
 
     if args.save and report.get("ok"):
         reports_dir = Path.home() / ".telegram-bot-autotest" / "reports"
