@@ -1,4 +1,4 @@
-# telegram-bot-autotest
+# telegram-bot-autotest-skill
 
 [English](README_en.md) | 中文
 
